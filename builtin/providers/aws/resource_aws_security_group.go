@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"time"
+	"sort"
 
 	"github.com/hashicorp/terraform/flatmap"
 	"github.com/hashicorp/terraform/helper/config"
@@ -11,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/terraform"
 	"github.com/mitchellh/goamz/ec2"
+	//"github.com/cenkalti/backoff"
 )
 
 func resource_aws_security_group_create(
@@ -138,8 +140,23 @@ func resource_aws_security_group_diff(
 			"vpc_id",
 		},
 	}
-
+	
 	return b.Diff(s, c)
+}
+type ByToPort []map[string]interface{}
+
+func (s ByToPort) Len() int {
+	return len(s)
+}
+func (s ByToPort) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+func (s ByToPort) Less(i, j int) bool {
+	if s[i]["to_port"].(int) == s[j]["to_port"].(int) {
+		return s[i]["to_port"].(int) < s[j]["to_port"].(int)
+	} else {
+		return s[i]["from_port"].(int) < s[j]["from_port"].(int)
+	}
 }
 
 func resource_aws_security_group_update_state(
@@ -153,6 +170,8 @@ func resource_aws_security_group_update_state(
 
 	// Flatten our ingress values
 	toFlatten := make(map[string]interface{})
+
+	//log.Printf("[JH-DEBUG] IPPerms type: %#v", reflect.TypeOf(sg.IPPerms))
 
 	ingressRules := make([]map[string]interface{}, 0, len(sg.IPPerms))
 	for _, perm := range sg.IPPerms {
@@ -176,9 +195,13 @@ func resource_aws_security_group_update_state(
 		}
 
 		// Reverse the order, as Amazon sorts it the reverse of how we created
-		// it.
+		// it. 
+		// No. This isn't right, we should be sorting the list by its values, then WE control how the values Amazon sends do the work instead of the other way around
 		ingressRules = append([]map[string]interface{}{n}, ingressRules...)
 	}
+	log.Printf("[JH-DEBUG] Ingress Rules Before %#v", ingressRules)
+	sort.Sort(ByToPort(ingressRules))
+	log.Printf("[JH-DEBUG] Ingress Rules After %#v", ingressRules)
 
 	toFlatten["ingress"] = ingressRules
 
@@ -194,6 +217,40 @@ func resource_aws_security_group_update_state(
 
 	return s, nil
 }
+
+func resource_aws_security_group_update(
+	s *terraform.ResourceState,
+	d *terraform.ResourceDiff,
+	meta interface{}) (*terraform.ResourceState, error) {
+	//p := meta.(*ResourceProvider)
+	//ec2conn := p.ec2conn
+	rs := s.MergeDiff(d)
+	
+	log.Printf("[JH-DEBUG] The Security Group Diff: %#v", rs)
+	// modify := false
+	// opts := new(ec2.ModifyInstance)
+
+	// if attr, ok := d.Attributes["source_dest_check"]; ok {
+	// 	modify = true
+	// 	opts.SourceDestCheck = attr.New != "" && attr.New != "false"
+	// 	opts.SetSourceDestCheck = true
+	// 	rs.Attributes["source_dest_check"] = strconv.FormatBool(
+	// 		opts.SourceDestCheck)
+	// }
+
+	// if modify {
+	// 	log.Printf("[INFO] Modifing instance %s: %#v", s.ID, opts)
+	// 	if _, err := ec2conn.ModifyInstance(s.ID, opts); err != nil {
+	// 		return s, err
+	// 	}
+
+	// 	// TODO(mitchellh): wait for the attributes we modified to
+	// 	// persist the change...
+	// }
+
+	return rs, nil
+}
+
 
 func resource_aws_security_group_validation() *config.Validator {
 	return &config.Validator{
@@ -220,19 +277,25 @@ func SGStateRefreshFunc(conn *ec2.EC2, id string) resource.StateRefreshFunc {
 	return func() (interface{}, string, error) {
 		sgs := []ec2.SecurityGroup{ec2.SecurityGroup{Id: id}}
 		resp, err := conn.SecurityGroups(sgs, nil)
-		if err != nil {
-			if ec2err, ok := err.(*ec2.Error); ok {
-				if ec2err.Code == "InvalidSecurityGroupID.NotFound" ||
-					ec2err.Code == "InvalidGroup.NotFound" {
-					resp = nil
-					err = nil
-				}
-			}
-
+		for i := 0; i < 5; i++ {
+			resp, err = conn.SecurityGroups(sgs, nil)
 			if err != nil {
-				log.Printf("Error on SGStateRefresh: %s", err)
-				return nil, "", err
+				time.Sleep(time.Second * 5)
+				continue
 			}
+			break
+		}
+		if ec2err, ok := err.(*ec2.Error); ok {
+			if ec2err.Code == "InvalidSecurityGroupID.NotFound" ||
+				ec2err.Code == "InvalidGroup.NotFound" {
+				resp = nil
+				err = nil
+			}
+		}
+		
+		if err != nil {
+			log.Printf("Error on SGStateRefresh: %s", err)
+			return nil, "", err
 		}
 
 		if resp == nil {
