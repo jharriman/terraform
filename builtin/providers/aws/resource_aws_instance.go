@@ -39,6 +39,11 @@ func resource_aws_instance_create(
 		associatePublicIPAddress = true
 	}
 
+	privateIPAddress := ""
+	if attr, ok := rs.Attributes["private_ip"]; ok {
+		privateIPAddress = attr
+	}
+
 	// Build the creation struct
 	runOpts := &ec2.RunInstances{
 		ImageId:                  rs.Attributes["ami"],
@@ -47,6 +52,7 @@ func resource_aws_instance_create(
 		KeyName:                  rs.Attributes["key_name"],
 		SubnetId:                 rs.Attributes["subnet_id"],
 		AssociatePublicIpAddress: associatePublicIPAddress,
+		PrivateIPAddress:         privateIPAddress,
 		UserData:                 []byte(userData),
 	}
 	if raw := flatmap.Expand(rs.Attributes, "security_groups"); raw != nil {
@@ -203,6 +209,7 @@ func resource_aws_instance_diff(
 			"source_dest_check":           diff.AttrTypeUpdate,
 			"user_data":                   diff.AttrTypeCreate,
 			"associate_public_ip_address": diff.AttrTypeCreate,
+			"private_ip":                  diff.AttrTypeCreate,
 		},
 
 		ComputedAttrs: []string{
